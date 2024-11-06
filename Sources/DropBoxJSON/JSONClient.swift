@@ -27,14 +27,14 @@ public protocol DropBoxJSON: Hashable, CaseIterable {
 }
 
 // MARK: - Dependency Key
-struct DropBoxJsonKey: DependencyKey {
-    static let liveValue: DropBoxFileJSONClient = DropBoxJSONService()
-    public init() {}
-}
 
-extension DependencyValues {
+public extension DependencyValues {
     var dropBoxJsonClient: DropBoxFileJSONClient {
         get { self[DropBoxJsonKey.self] }
         set { self[DropBoxJsonKey.self] = newValue }
+    }
+    struct DropBoxJsonKey: DependencyKey {
+        public static let liveValue: DropBoxFileJSONClient = DropBoxJSONService()
+        public init() {}
     }
 }
