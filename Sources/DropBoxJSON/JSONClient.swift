@@ -14,6 +14,8 @@ import Dependencies
 public protocol DropBoxFileJSONClient {
     func prepareContent<Item: DropBoxJSON>(jsonType: Item.Type) async throws
     func getJSON<Item: DropBoxJSON, T: Decodable>(json: Item, decodingType: T.Type) throws -> T
+    func getData<Item: DropBoxJSON>(of json: Item) throws -> Data
+    func getDictionary<Item: DropBoxJSON>(of json: Item) throws -> [String: Any]
     var updatePublisher: AnyPublisher<any DropBoxJSON, Never> { get }
 }
 // MARK: - DropBoxJSON Protocol

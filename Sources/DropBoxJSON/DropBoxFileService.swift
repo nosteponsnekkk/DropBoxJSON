@@ -95,6 +95,37 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         return decodedData
     }
     
+    /// Retrieves decoded JSON data from the cached JSON entries.
+    /// - Parameters:
+    ///   - json: An enum case conforming to `DropBoxJSON`.
+    /// - Returns: JSON data.
+    public func getData<Item: DropBoxJSON>(of json: Item) throws -> Data {
+        // Get the cached entry
+        guard let cachedEntry = cachedJSONs[json.fileName] else {
+            throw NSError(domain: "DropBoxJSONService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
+        }        
+        return try Data(contentsOf: cachedEntry.fileURL)
+    }
+    /// Retrieves decoded JSON data from the cached JSON entries.
+    /// - Parameters:
+    ///   - json: An enum case conforming to `DropBoxJSON`.
+    /// - Returns: Dictionary representation of JSON.
+    public func getDictionary<Item: DropBoxJSON>(of json: Item) throws -> [String: Any] {
+        // Get the cached entry
+        guard let cachedEntry = cachedJSONs[json.fileName] else {
+            throw NSError(domain: "DropBoxJSONService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
+        }
+        let data = try Data(contentsOf: cachedEntry.fileURL)
+        let decoded = try JSONSerialization.jsonObject(with: data)
+        guard let dict = decoded as? [String : Any] else {
+            throw NSError(
+                domain: "DropBoxJSONService",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Can't trnaslate data: \(data) of \(json.fileName) in dictionary"])
+        }
+        return dict
+    }
+    
     // MARK: - Private Methods
     
     /// Lists files in a Dropbox folder.
