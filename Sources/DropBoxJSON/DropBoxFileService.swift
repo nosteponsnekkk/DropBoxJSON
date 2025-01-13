@@ -1,39 +1,57 @@
-//
-//  DropBoxJSONService.swift
-//  DropBoxJSON
-//
-//  Created by Oleg on 31.10.2024.
-//
-
 import Foundation
 import SwiftyDropbox
 import Combine
 import ConnectionManager
 
-// MARK: - DropBoxJSONService Class
 
+
+// MARK: - DropBoxJSONService
 public final class DropBoxJSONService: DropBoxFileJSONClient {
+    
+    // MARK: - Internal types
+    
+    fileprivate class CachedJSONEntry {
+        let item: any DropBoxJSON   // The enum case (e.g., JSONFile.genres)
+        var filePath: String        // Dropbox file path (e.g., "/JSONs/genres.json")
+        var fileURL: URL            // Local file URL in the Documents directory
+        var rev: String             // Dropbox revision ID
+        
+        init(item: any DropBoxJSON, filePath: String, fileURL: URL, rev: String) {
+            self.item = item
+            self.filePath = filePath
+            self.fileURL = fileURL
+            self.rev = rev
+        }
+    }
+    
+    // MARK: - Properties
     
     private var client: DropboxClient? {
         DropboxClientsManager.authorizedClient
     }
     
-    // Map to store cached JSON entries; keys are file names (String)
+    private let fileManager = FileManager.default
+    
+    /// In-memory cache: fileName -> cached entry
     private var cachedJSONs: [String: CachedJSONEntry] = [:]
     
-    // Connection monitoring
-    private var connectionCancellable: AnyCancellable?
-    private var pollingTimer: Timer?
+    /// Indicates whether we have attempted to load from Dropbox at least once.
     private var isPrepared = false
     
-    // Publisher to notify updates
+    // MARK: Connection / Polling
+    private var connectionCancellable: AnyCancellable?
+    private var pollingTimer: Timer?
+    
+    // Publisher that emits JSON enum cases whenever a file is updated.
     private let updateSubject = PassthroughSubject<any DropBoxJSON, Never>()
     public var updatePublisher: AnyPublisher<any DropBoxJSON, Never> {
         updateSubject.eraseToAnyPublisher()
     }
     
+    // MARK: - Init / Deinit
+    
     public init() {
-        // Set up connection monitoring
+        // Observe connectivity & manage polling
         connectionCancellable = ConnectionManager.publisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isConnected in
@@ -50,109 +68,142 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         stopPolling()
     }
     
-    /// Prepares content by downloading JSON files from Dropbox and storing them locally.
-    /// - Parameter jsonType: An enum type conforming to `DropBoxJSON`.
-    public func prepareContent<Item: DropBoxJSON>(jsonType: Item.Type) async throws {
-        // List files in the folder
-        let folderPath = Item.parentFolderPath
-        let files = try await listFiles(inFolder: folderPath)
-        
-        // Map file names to items
-        var itemsByFileName = [String: Item]()
+    // MARK: - Public Methods
+    
+    /// Loads local files from Documents directory for all cases in `jsonType`.
+    /// If files exist, creates or updates the `cachedJSONs` so `get...` methods can use them immediately.
+    public func loadLocalFiles<Item: DropBoxJSON>(for jsonType: Item.Type) -> Bool {
         for item in Item.allCases {
-            itemsByFileName[item.fileName] = item
-        }
-        
-        // For each file, download it and store it
-        for file in files {
-            // Check if it's one of the JSON files we care about
-            if let item = itemsByFileName[file.name] {
-                // Download the file
-                let localURL = try await downloadFile(at: file.pathLower ?? "")
-                // Create a cached entry
-                let cachedEntry = CachedJSONEntry(item: item, filePath: file.pathLower ?? "", fileURL: localURL, rev: file.rev)
+            let localURL = documentsURL(for: item.fileName)
+            if fileManager.fileExists(atPath: localURL.path) {
+                // If we already have a file locally, create/update the cache
+                let cachedEntry = CachedJSONEntry(item: item,
+                                                  filePath: "",  // unknown until we poll Dropbox
+                                                  fileURL: localURL,
+                                                  rev: "")       // unknown until we poll Dropbox
                 cachedJSONs[item.fileName] = cachedEntry
+            } else {
+                return false
             }
         }
-        
-        self.isPrepared = true
+        return true
     }
     
-    /// Retrieves decoded JSON data from the cached JSON entries.
-    /// - Parameters:
-    ///   - json: An enum case conforming to `DropBoxJSON`.
-    ///   - decodingType: The type to decode the JSON data into.
-    /// - Returns: An object of type `T` decoded from the JSON data.
-    public func getJSON<Item: DropBoxJSON, T: Decodable>(json: Item, decodingType: T.Type) throws -> T {
-        // Get the cached entry
-        guard let cachedEntry = cachedJSONs[json.fileName] else {
-            throw NSError(domain: "DropBoxJSONService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
-        }
-        // Read data from the file URL
-        let data = try Data(contentsOf: cachedEntry.fileURL)
-        // Decode the data
-        let decodedData = try JSONDecoder().decode(decodingType, from: data)
-        return decodedData
-    }
     
-    /// Retrieves decoded JSON data from the cached JSON entries.
-    /// - Parameters:
-    ///   - json: An enum case conforming to `DropBoxJSON`.
-    /// - Returns: JSON data.
-    public func getData<Item: DropBoxJSON>(of json: Item) throws -> Data {
-        // Get the cached entry
-        guard let cachedEntry = cachedJSONs[json.fileName] else {
-            throw NSError(domain: "DropBoxJSONService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
-        }        
-        return try Data(contentsOf: cachedEntry.fileURL)
-    }
-    /// Retrieves decoded JSON data from the cached JSON entries.
-    /// - Parameters:
-    ///   - json: An enum case conforming to `DropBoxJSON`.
-    /// - Returns: Dictionary representation of JSON.
-    public func getDictionary<Item: DropBoxJSON>(of json: Item) throws -> [String: Any] {
-        // Get the cached entry
-        guard let cachedEntry = cachedJSONs[json.fileName] else {
-            throw NSError(domain: "DropBoxJSONService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
-        }
-        let data = try Data(contentsOf: cachedEntry.fileURL)
-        let decoded = try JSONSerialization.jsonObject(with: data)
-        guard let dict = decoded as? [String : Any] else {
-            throw NSError(
-                domain: "DropBoxJSONService",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Can't trnaslate data: \(data) of \(json.fileName) in dictionary"])
-        }
-        return dict
-    }
-    
-    // MARK: - Private Methods
-    
-    /// Lists files in a Dropbox folder.
-    /// - Parameter folderPath: The path of the folder in Dropbox.
-    /// - Returns: An array of `Files.FileMetadata`.
-    private func listFiles(inFolder folderPath: String) async throws -> [Files.FileMetadata] {
+    /// 1) Load local files (if any) into the cache so `get...` calls don’t block.
+    /// 2) Attempt to download new files from Dropbox (async). If successful, update cache.
+    /// 3) After at least one successful Dropbox download, `isPrepared` becomes `true`.
+    public func prepareContent<Item: DropBoxJSON>(jsonType: Item.Type) async throws {
+       
+        // 2. Attempt to load from Dropbox (if authorized). If it fails, we keep using local data.
         guard let client = client else {
-            throw NSError(domain: "DropBoxJSONService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Client not authorized"])
+            // No authorized client => keep local data
+            print("Dropbox client not authorized. Using local cache if available.")
+            return
         }
         
-        var result: [Files.FileMetadata] = []
+        do {
+            let folderPath = Item.parentFolderPath
+            let files = try await listFiles(inFolder: folderPath, using: client)
+            
+            // Build a lookup so we know which Dropbox filename corresponds to which enum case
+            var itemsByFileName = [String: Item]()
+            for item in Item.allCases {
+                itemsByFileName[item.fileName] = item
+            }
+            
+            // For each Dropbox file, if it matches an enum case, download & update cache
+            for fileMetadata in files {
+                guard let dropboxFileName = fileMetadata.name as String?,
+                      let item = itemsByFileName[dropboxFileName] else {
+                    continue
+                }
+                let pathLower = fileMetadata.pathLower ?? ""
+                let rev = fileMetadata.rev
+                let localURL = try await downloadFile(at: pathLower)
+                
+                // Create or update cached entry
+                let entry = CachedJSONEntry(item: item,
+                                            filePath: pathLower,
+                                            fileURL: localURL,
+                                            rev: rev)
+                cachedJSONs[dropboxFileName] = entry
+            }
+            
+            // 3. Mark as prepared on successful Dropbox fetch
+            self.isPrepared = true
+            startPolling()  // might as well ensure polling is active
+        } catch {
+            // If any network or Dropbox error occurs, do *not* throw away local data
+            print("Failed to prepare content from Dropbox: \(error)")
+        }
+    }
+    
+    /// Returns a decoded object from the cached JSON.
+    public func getJSON<Item: DropBoxJSON, T: Decodable>(json: Item, decodingType: T.Type) throws -> T {
+        guard let entry = cachedJSONs[json.fileName] else {
+            throw NSError(domain: "DropBoxJSONService",
+                          code: 1001,
+                          userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
+        }
+        
+        let data = try Data(contentsOf: entry.fileURL)
+        return try JSONDecoder().decode(decodingType, from: data)
+    }
+    
+    /// Returns raw `Data` from the cached JSON.
+    public func getData<Item: DropBoxJSON>(of json: Item) throws -> Data {
+        guard let entry = cachedJSONs[json.fileName] else {
+            throw NSError(domain: "DropBoxJSONService",
+                          code: 1002,
+                          userInfo: [NSLocalizedDescriptionKey: "No cached data for \(json.fileName)"])
+        }
+        return try Data(contentsOf: entry.fileURL)
+    }
+    
+    /// Returns a `[String: Any]` from the cached JSON.
+    public func getDictionary<Item: DropBoxJSON>(of json: Item) throws -> [String: Any] {
+        let data = try getData(of: json)
+        let jsonObject = try JSONSerialization.jsonObject(with: data)
+        
+        guard let dictionary = jsonObject as? [String: Any] else {
+            throw NSError(domain: "DropBoxJSONService",
+                          code: 1003,
+                          userInfo: [NSLocalizedDescriptionKey: "Data cannot be cast to a dictionary"])
+        }
+        return dictionary
+    }
+    
+    // MARK: - Private Helpers
+    
+    
+    /// Gets a `URL` in the user’s Documents directory for a given filename.
+    private func documentsURL(for fileName: String) -> URL {
+        guard let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            fatalError("No documents directory found.")
+        }
+        return docsDir.appendingPathComponent(fileName)
+    }
+    
+    /// Lists the files (as `Files.FileMetadata`) in the given Dropbox folder.
+    private func listFiles(inFolder folderPath: String, using client: DropboxClient) async throws -> [Files.FileMetadata] {
+        var allFiles: [Files.FileMetadata] = []
         var cursor: String?
         
         repeat {
             let response: Files.ListFolderResult
-            if let cursor = cursor {
-                response = try await client.files.listFolderContinue(cursor: cursor).response()
+            if let existingCursor = cursor {
+                response = try await client.files.listFolderContinue(cursor: existingCursor).response()
             } else {
                 response = try await client.files.listFolder(path: folderPath).response()
             }
             
             let files = response.entries.compactMap { $0 as? Files.FileMetadata }
-            result.append(contentsOf: files)
+            allFiles.append(contentsOf: files)
             cursor = response.hasMore ? response.cursor : nil
         } while cursor != nil
         
-        return result
+        return allFiles
     }
     
     /// Downloads a file from Dropbox.
@@ -171,12 +222,14 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         return tempFileURL
     }
     
-    /// Starts polling for updates every 10 seconds.
+    // MARK: - Polling Logic
+    
+    /// Start polling every 10 seconds, if we have prepared content at least once.
     private func startPolling() {
-        // Ensure we don't start multiple timers
         guard pollingTimer == nil, isPrepared else { return }
         
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 10.0,
+                                            repeats: true) { [weak self] _ in
             self?.pollForUpdates()
         }
     }
@@ -189,8 +242,8 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     
     /// Polls for updates to the cached JSON files.
     private func pollForUpdates() {
-        // For each cached JSON, check if the rev has changed
-        for (fileName, cachedEntry) in cachedJSONs {
+        
+        for (_, cachedEntry) in cachedJSONs {
             Task {
                 do {
                     if let currentRev = try await getCurrentRev(for: cachedEntry.filePath), currentRev != cachedEntry.rev {
@@ -199,12 +252,12 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
                         // Update the cachedEntry
                         cachedEntry.fileURL = newFileURL
                         cachedEntry.rev = currentRev
-                        print("Updated JSON file: \(fileName)")
-                        // Publish update
-                        self.updateSubject.send(cachedEntry.item)
+                        
+                        print("Updated JSON file: \(cachedEntry.item.fileName)")
+                        updateSubject.send(cachedEntry.item)
                     }
                 } catch {
-                    print("Error polling for updates: \(error)")
+                    print("Error polling Dropbox for updates: \(error)")
                 }
             }
         }
@@ -224,101 +277,4 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         }
         return nil
     }
-    
-    /// Cached JSON entry containing the file path, local file URL, and rev.
-    fileprivate class CachedJSONEntry {
-        let item: any DropBoxJSON // The enum case
-        let filePath: String // Dropbox file path
-        var fileURL: URL // Local file URL
-        var rev: String // The rev from Dropbox
-        init(item: any DropBoxJSON, filePath: String, fileURL: URL, rev: String) {
-            self.item = item
-            self.filePath = filePath
-            self.fileURL = fileURL
-            self.rev = rev
-        }
-    }
 }
-// MARK: - Usage Examples
-
-/*
- Example of a JSON enum to be operated via this library:
- 
- enum JSONFile: DropBoxJSON {
-     case genres
-     
-     // Specify the parent folder path in Dropbox
-     static var parentFolderPath: String {
-         return "/JSONs"
-     }
-     
-     // Provide the file name for each case
-     var fileName: String {
-         switch self {
-         case .genres:
-             return "genres.json"
-         }
-     }
- }
- 
- Example of usage via The Composable Architecture (TCA):
- 
- // Preparing JSONs
- return .run { send in
-     do {
-         // Prepare the content by downloading JSON files
-         try await jsonClient.prepareContent(jsonType: JSONFile.self)
-     } catch {
-         // Handle any errors during preparation
-         print(error.localizedDescription)
-     }
- }
- 
- // Handling JSONs on view appearance
- func handleOnAppear(_ state: inout State) -> Effect<Action> {
-     do {
-         // Retrieve and decode the 'genres' JSON data
-         let genres = try jsonClient.getJSON(
-             json: JSONFile.genres,
-             decodingType: [Genre].self
-         )
-         // Update state with the fetched genres
-         state.genres = genres
-     } catch {
-         // Handle any errors during data retrieval
-         print("Error retrieving genres: \(error.localizedDescription)")
-     }
-     // Subscribe to updates from the jsonClient's updatePublisher
-     return .publisher {
-         jsonClient.updatePublisher
-             .compactMap { update -> Action? in
-                 guard let jsonFile = update as? JSONFile else {
-                     return nil
-                 }
-                 return .didReceiveNewJSON(jsonFile)
-             }
-             .eraseToAnyPublisher()
-     }
- }
- 
- // Reloading content when JSON files are updated
- func reloadContent(updatedJSON: JSONFile, _ state: inout State) -> Effect<Action> {
-     switch updatedJSON {
-     case .genres:
-         do {
-             // Fetch the updated 'genres' JSON data
-             let genres = try jsonClient.getJSON(
-                 json: JSONFile.genres,
-                 decodingType: [Genre].self
-             )
-             // Update state with the new data
-             state.genres = genres
-         } catch {
-             // Handle any errors during the reload
-             print("Error reloading genres: \(error.localizedDescription)")
-         }
-     }
-     
-     return .none
- }
-*/
