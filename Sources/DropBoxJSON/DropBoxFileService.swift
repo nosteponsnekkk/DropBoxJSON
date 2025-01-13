@@ -53,6 +53,7 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         // Observe connectivity & manage polling
         connectionCancellable = ConnectionManager.publisher
             .receive(on: DispatchQueue.main)
+            .removeDuplicates()
             .sink { [weak self] isConnected in
                 if isConnected {
                     self?.startPolling()
@@ -136,7 +137,6 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
             
             // 3. Mark as prepared on successful Dropbox fetch
             self.isPrepared = true
-            startPolling()  // might as well ensure polling is active
         } catch {
             // If any network or Dropbox error occurs, do *not* throw away local data
             print("Failed to prepare content from Dropbox: \(error)")
