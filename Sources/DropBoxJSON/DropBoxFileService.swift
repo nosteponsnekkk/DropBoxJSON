@@ -235,10 +235,11 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     private func startPolling() {
         guard pollingTimer == nil, isPrepared else { return }
         
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 10.0,
-                                            repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.pollForUpdates()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pollingTimer = timer
     }
     
     /// Stops polling for updates.
