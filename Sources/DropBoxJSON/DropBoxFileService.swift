@@ -4,7 +4,6 @@ import Combine
 import ConnectionManager
 
 
-
 // MARK: - DropBoxJSONService
 public final class DropBoxJSONService: DropBoxFileJSONClient {
     
@@ -70,19 +69,21 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     
     // MARK: - Public Methods
     
-    /// Loads local files from Documents directory for all cases in `jsonType`.
-    /// If files exist, creates or updates the `cachedJSONs` so `get...` methods can use them immediately.
+    /// Loads local files from the Documents directory for all cases in `jsonType`.
+    /// If any file is missing, returns `false`. Otherwise `true`.
     public func loadLocalFiles<Item: DropBoxJSON>(for jsonType: Item.Type) -> Bool {
         for item in Item.allCases {
             let localURL = documentsURL(for: item.fileName)
+            
             if fileManager.fileExists(atPath: localURL.path) {
-                // If we already have a file locally, create/update the cache
+                // Create/update the cache
                 let cachedEntry = CachedJSONEntry(item: item,
-                                                  filePath: "",  // unknown until we poll Dropbox
+                                                  filePath: "",  // we’ll fill this later from Dropbox
                                                   fileURL: localURL,
-                                                  rev: "")       // unknown until we poll Dropbox
+                                                  rev: "")        // we’ll fill this once we poll
                 cachedJSONs[item.fileName] = cachedEntry
             } else {
+                // As soon as we find one missing file, return false
                 return false
             }
         }
@@ -114,13 +115,16 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
             
             // For each Dropbox file, if it matches an enum case, download & update cache
             for fileMetadata in files {
-                guard let dropboxFileName = fileMetadata.name as String?,
-                      let item = itemsByFileName[dropboxFileName] else {
+                let dropboxFileName = fileMetadata.name
+                guard let item = itemsByFileName[dropboxFileName] else {
                     continue
                 }
+                
                 let pathLower = fileMetadata.pathLower ?? ""
                 let rev = fileMetadata.rev
-                let localURL = try await downloadFile(at: pathLower)
+                
+                // MARK: CHANGES – pass the actual local filename so we store in Documents (NOT temp!)
+                let localURL = try await downloadFile(at: pathLower, localFileName: dropboxFileName)
                 
                 // Create or update cached entry
                 let entry = CachedJSONEntry(item: item,
@@ -176,7 +180,6 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     
     // MARK: - Private Helpers
     
-    
     /// Gets a `URL` in the user’s Documents directory for a given filename.
     private func documentsURL(for fileName: String) -> URL {
         guard let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
@@ -206,20 +209,23 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
         return allFiles
     }
     
-    /// Downloads a file from Dropbox.
-    /// - Parameter path: The Dropbox path of the file.
-    /// - Returns: The local URL where the file was saved.
-    private func downloadFile(at path: String) async throws -> URL {
+    // MARK: CHANGES – This now writes to Documents, using the same filename.
+    /// Downloads a file from Dropbox and saves it in Documents directory with a given filename.
+    private func downloadFile(at path: String, localFileName: String) async throws -> URL {
         guard let client = client else {
-            throw NSError(domain: "DropBoxJSONService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Client not authorized"])
+            throw NSError(domain: "DropBoxJSONService",
+                          code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Client not authorized"])
         }
         
         let response = try await client.files.download(path: path).response()
         let data = response.1
-        // Save data to a local file
-        let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
-        try data.write(to: tempFileURL)
-        return tempFileURL
+        
+        // Create a local URL under Documents with the same fileName
+        let localURL = documentsURL(for: localFileName)
+        try data.write(to: localURL, options: .atomic)
+        
+        return localURL
     }
     
     // MARK: - Polling Logic
@@ -242,13 +248,15 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     
     /// Polls for updates to the cached JSON files.
     private func pollForUpdates() {
-        
         for (_, cachedEntry) in cachedJSONs {
             Task {
                 do {
-                    if let currentRev = try await getCurrentRev(for: cachedEntry.filePath), currentRev != cachedEntry.rev {
+                    if let currentRev = try await getCurrentRev(for: cachedEntry.filePath),
+                       currentRev != cachedEntry.rev {
+                        
                         // Rev has changed, download new JSON
-                        let newFileURL = try await downloadFile(at: cachedEntry.filePath)
+                        let newFileURL = try await downloadFile(at: cachedEntry.filePath,
+                                                                localFileName: cachedEntry.item.fileName)
                         // Update the cachedEntry
                         cachedEntry.fileURL = newFileURL
                         cachedEntry.rev = currentRev
@@ -268,7 +276,9 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     /// - Returns: The current rev string or `nil` if failed.
     private func getCurrentRev(for filePath: String) async throws -> String? {
         guard let client = client else {
-            throw NSError(domain: "DropBoxJSONService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Client not authorized"])
+            throw NSError(domain: "DropBoxJSONService",
+                          code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Client not authorized"])
         }
         
         let metadata = try await client.files.getMetadata(path: filePath).response()
