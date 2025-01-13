@@ -136,7 +136,8 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
             }
             
             // 3. Mark as prepared on successful Dropbox fetch
-            self.isPrepared = true
+            isPrepared = true
+            startPolling()
         } catch {
             // If any network or Dropbox error occurs, do *not* throw away local data
             print("Failed to prepare content from Dropbox: \(error)")
