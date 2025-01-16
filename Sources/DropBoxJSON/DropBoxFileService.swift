@@ -183,9 +183,11 @@ public final class DropBoxJSONService: DropBoxFileJSONClient {
     
     /// Gets a `URL` in the user’s Documents directory for a given filename.
     private func documentsURL(for fileName: String) -> URL {
-        guard let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        
+        guard let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("DropBoxJSON") else {
             fatalError("No documents directory found.")
         }
+        try? fileManager.createDirectory(at: docsDir, withIntermediateDirectories: true)
         return docsDir.appendingPathComponent(fileName)
     }
     
